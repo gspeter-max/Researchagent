@@ -41,15 +41,22 @@ class EvaluatorNode:
             f"}}"
         )
 
-        resp = self.llm.generate_json(
-            prompt,
-            system="You are a rigorous verification reviewer assessing research completeness against quality criteria."
-        )
-
-        score = float(resp.get("score", 0.5))
-        critique = str(resp.get("critique", "Verification completed."))
-        missing_aspects = resp.get("missing_aspects", [])
-        suggested_queries = resp.get("suggested_queries", [])
+        try:
+            resp = self.llm.generate_json(
+                prompt,
+                system="You are a rigorous verification reviewer assessing research completeness against quality criteria.",
+                raise_on_error=True
+            )
+            score = float(resp.get("score", 0.5))
+            critique = str(resp.get("critique", "Verification completed."))
+            missing_aspects = resp.get("missing_aspects", [])
+            suggested_queries = resp.get("suggested_queries", [])
+        except Exception as e:
+            state.add_log(f"Warning: Evaluator JSON parsing exception ({e}). Defaulting to partial score.")
+            score = 0.5
+            critique = "Could not parse structured verification result; triggering re-query loop."
+            missing_aspects = ["Further technical details and real-world evidence"]
+            suggested_queries = []
 
         is_sufficient = score >= self.sufficiency_threshold
 

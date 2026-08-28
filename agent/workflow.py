@@ -1,5 +1,6 @@
-from typing import Callable, Optional, Tuple
-from agent.state import ResearchState, AgentStatus
+from dataclasses import dataclass
+from typing import Callable, Optional, Tuple, Dict, Any, Union
+from agent.state import ResearchState, AgentStatus, HumanAction, EvaluationResult
 from agent.llm import LLMClient
 from agent.tools.search import WebSearcher
 from agent.nodes.researcher import ResearchNode
@@ -8,29 +9,28 @@ from agent.nodes.synthesizer import SynthesizerNode
 
 
 # Callback signatures for Human-in-the-Loop (HITL)
-# Initial: (topic, state) -> (action: "PROCEED" | "CANCEL", guidance_text: Optional[str])
-InitialGuidanceCallback = Callable[[str, ResearchState], Tuple[str, Optional[str]]]
+# Initial: (topic, state) -> (action: HumanAction | str, guidance_text: Optional[str])
+InitialGuidanceCallback = Callable[[str, ResearchState], Tuple[Union[HumanAction, str], Optional[str]]]
 
-# Verification: (state) -> (action: "PROCEED" | "SEARCH_MORE" | "CANCEL", feedback_text: Optional[str])
-VerificationFeedbackCallback = Callable[[ResearchState], Tuple[str, Optional[str]]]
+# Verification: (state) -> (action: HumanAction | str, feedback_text: Optional[str])
+VerificationFeedbackCallback = Callable[[ResearchState], Tuple[Union[HumanAction, str], Optional[str]]]
 
 # Step notification: (message, state) -> None
 StepCallback = Callable[[str, ResearchState], None]
+
+
+@dataclass
+class WorkflowActionDirective:
+    """Action outcome directive returned by action handlers."""
+    terminate: bool = False
+    break_loop: bool = False
 
 
 class ResearchReviewWorkflow:
     """
     Loop-Engineered Research & Review Workflow.
     
-    Flow:
-    1. Initial Query & Human Alignment (Proceed / Cancel / Custom Focus)
-    2. Query Formulation (userquery + state.findings + state.evaluation + state.feedback)
-    3. Web Search & Information Retrieval
-    4. Quality Verification & Scoring (0.0 to 1.0)
-    5. Threshold-Based Routing:
-       - Score >= Threshold -> LLM Synthesizer -> Final Deliverable
-       - Score < Threshold  -> Human-in-the-Loop (Proceed / Cancel / Search More with Feedback)
-                               -> Feedback recorded in state -> Loops back to Step 2
+    Employs Dictionary-based Action Dispatch to eliminate fragile if/else ladders.
     """
 
     def __init__(
@@ -48,6 +48,110 @@ class ResearchReviewWorkflow:
         self.research_node = ResearchNode(self.llm, self.searcher)
         self.evaluator_node = EvaluatorNode(self.llm, sufficiency_threshold=self.sufficiency_threshold)
         self.synthesizer_node = SynthesizerNode(self.llm)
+
+        # Action Handler Dispatch Tables
+        self._initial_action_handlers: Dict[
+            HumanAction,
+            Callable[[ResearchState, Optional[str], Callable[[str], None]], WorkflowActionDirective]
+        ] = {
+            HumanAction.CANCEL: self._handle_initial_cancel,
+            HumanAction.PROCEED: self._handle_initial_proceed,
+            HumanAction.PROCEED_OVERRIDE: self._handle_initial_proceed,
+            HumanAction.SEARCH_MORE: self._handle_initial_proceed,
+        }
+
+        self._verification_action_handlers: Dict[
+            HumanAction,
+            Callable[[ResearchState, Optional[str], EvaluationResult, Callable[[str], None]], WorkflowActionDirective]
+        ] = {
+            HumanAction.CANCEL: self._handle_verification_cancel,
+            HumanAction.PROCEED: self._handle_verification_override,
+            HumanAction.PROCEED_OVERRIDE: self._handle_verification_override,
+            HumanAction.SEARCH_MORE: self._handle_verification_search_more,
+        }
+
+    # -----------------------------------------------------------------------
+    # Action Dispatch Handlers
+    # -----------------------------------------------------------------------
+
+    def _handle_initial_cancel(
+        self,
+        state: ResearchState,
+        guidance: Optional[str],
+        notify: Callable[[str], None]
+    ) -> WorkflowActionDirective:
+        state.status = AgentStatus.CANCELLED
+        state.add_feedback(HumanAction.CANCEL, "Cancelled by user before research began.")
+        notify("Workflow cancelled by user at initial alignment.")
+        return WorkflowActionDirective(terminate=True)
+
+    def _handle_initial_proceed(
+        self,
+        state: ResearchState,
+        guidance: Optional[str],
+        notify: Callable[[str], None]
+    ) -> WorkflowActionDirective:
+        if guidance:
+            state.add_feedback(HumanAction.PROCEED, guidance)
+            notify(f"Initial guidance applied: '{guidance}'")
+        else:
+            state.add_feedback(HumanAction.PROCEED, None)
+        return WorkflowActionDirective()
+
+    def _handle_verification_cancel(
+        self,
+        state: ResearchState,
+        feedback_text: Optional[str],
+        eval_res: EvaluationResult,
+        notify: Callable[[str], None]
+    ) -> WorkflowActionDirective:
+        state.status = AgentStatus.CANCELLED
+        state.add_feedback(
+            HumanAction.CANCEL,
+            feedback_text or "Cancelled by human during review.",
+            eval_res.score
+        )
+        notify("Workflow cancelled by user during verification review.")
+        return WorkflowActionDirective(terminate=True)
+
+    def _handle_verification_override(
+        self,
+        state: ResearchState,
+        feedback_text: Optional[str],
+        eval_res: EvaluationResult,
+        notify: Callable[[str], None]
+    ) -> WorkflowActionDirective:
+        state.add_feedback(HumanAction.PROCEED_OVERRIDE, feedback_text, eval_res.score)
+        notify("Human chose to proceed with current findings. Routing to LLM Synthesizer.")
+        return WorkflowActionDirective(break_loop=True)
+
+    def _handle_verification_search_more(
+        self,
+        state: ResearchState,
+        feedback_text: Optional[str],
+        eval_res: EvaluationResult,
+        notify: Callable[[str], None]
+    ) -> WorkflowActionDirective:
+        state.add_feedback(HumanAction.SEARCH_MORE, feedback_text, eval_res.score)
+        notify(
+            f"Human guidance recorded: '{feedback_text or 'Auto-refine missing aspects'}'. "
+            f"Passing context to query generator for next iteration..."
+        )
+        return WorkflowActionDirective()
+
+    def _parse_action(self, action_val: Any, default: HumanAction) -> HumanAction:
+        if isinstance(action_val, HumanAction):
+            return action_val
+        if isinstance(action_val, str):
+            try:
+                return HumanAction(action_val.upper().strip())
+            except ValueError:
+                pass
+        return default
+
+    # -----------------------------------------------------------------------
+    # Main Workflow Execution
+    # -----------------------------------------------------------------------
 
     def run(
         self,
@@ -72,20 +176,12 @@ class ResearchReviewWorkflow:
         # -------------------------------------------------------------
         state.status = AgentStatus.AWAITING_INITIAL_GUIDANCE
         if initial_guidance_callback:
-            action, guidance = initial_guidance_callback(topic, state)
-            action = action.upper().strip() if action else "PROCEED"
-
-            if action == "CANCEL":
-                state.status = AgentStatus.CANCELLED
-                state.add_feedback(action="CANCEL", text="Cancelled by user before research began.")
-                notify("Workflow cancelled by user at initial alignment.")
+            raw_action, guidance = initial_guidance_callback(topic, state)
+            action = self._parse_action(raw_action, default=HumanAction.PROCEED)
+            handler = self._initial_action_handlers.get(action, self._handle_initial_proceed)
+            directive = handler(state, guidance, notify)
+            if directive.terminate:
                 return state
-
-            if guidance:
-                state.add_feedback(action="PROCEED", text=guidance)
-                notify(f"Initial guidance applied: '{guidance}'")
-            else:
-                state.add_feedback(action="PROCEED", text=None)
 
         # -------------------------------------------------------------
         # Step 2: Self-Correcting Research & Verification Loop
@@ -122,31 +218,18 @@ class ResearchReviewWorkflow:
             notify("--- Human-in-the-Loop Review Triggered (Score below threshold) ---")
 
             if verification_feedback_callback:
-                action, feedback_text = verification_feedback_callback(state)
-                action = action.upper().strip() if action else "SEARCH_MORE"
+                raw_action, feedback_text = verification_feedback_callback(state)
+                action = self._parse_action(raw_action, default=HumanAction.SEARCH_MORE)
             else:
-                # Default behavior when running non-interactively
-                action, feedback_text = "SEARCH_MORE", None
+                action, feedback_text = HumanAction.SEARCH_MORE, None
 
-            if action == "CANCEL":
-                state.status = AgentStatus.CANCELLED
-                state.add_feedback(action="CANCEL", text=feedback_text or "Cancelled by human during review.", score=eval_res.score)
-                notify("Workflow cancelled by user during verification review.")
+            handler = self._verification_action_handlers.get(action, self._handle_verification_search_more)
+            directive = handler(state, feedback_text, eval_res, notify)
+
+            if directive.terminate:
                 return state
-
-            elif action == "PROCEED":
-                # Human overrides low score to synthesize now
-                state.add_feedback(action="PROCEED_OVERRIDE", text=feedback_text, score=eval_res.score)
-                notify("Human chose to proceed with current findings. Routing to LLM Synthesizer.")
+            if directive.break_loop:
                 break
-
-            else:
-                # SEARCH_MORE: Incorporate feedback and loop back to query generation
-                state.add_feedback(action="SEARCH_MORE", text=feedback_text, score=eval_res.score)
-                notify(
-                    f"Human guidance recorded: '{feedback_text or 'Auto-refine missing aspects'}'. "
-                    f"Passing context to query generator for next iteration..."
-                )
 
         # -------------------------------------------------------------
         # Step 3: LLM Synthesis (Final Answer Generation)

@@ -15,6 +15,13 @@ class AgentStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class HumanAction(str, Enum):
+    PROCEED = "PROCEED"
+    PROCEED_OVERRIDE = "PROCEED_OVERRIDE"
+    SEARCH_MORE = "SEARCH_MORE"
+    CANCEL = "CANCEL"
+
+
 @dataclass
 class SearchResult:
     title: str
@@ -35,7 +42,7 @@ class EvaluationResult:
 @dataclass
 class HumanFeedback:
     iteration: int
-    action: str  # "PROCEED", "SEARCH_MORE", "CANCEL"
+    action: HumanAction
     feedback_text: Optional[str] = None
     verification_score: Optional[float] = None
 
@@ -59,12 +66,23 @@ class ResearchState:
     def add_log(self, message: str) -> None:
         self.logs.append(message)
 
-    def add_feedback(self, action: str, text: Optional[str] = None, score: Optional[float] = None) -> None:
+    def add_feedback(
+        self,
+        action: "HumanAction | str",
+        text: Optional[str] = None,
+        score: Optional[float] = None
+    ) -> None:
         if text:
             self.latest_feedback = text
+
+        if isinstance(action, str):
+            action_enum = HumanAction(action.upper())
+        else:
+            action_enum = action
+
         feedback_entry = HumanFeedback(
             iteration=self.iteration,
-            action=action,
+            action=action_enum,
             feedback_text=text,
             verification_score=score
         )

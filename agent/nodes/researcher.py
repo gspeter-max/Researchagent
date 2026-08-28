@@ -64,12 +64,16 @@ class ResearchNode:
             "Format as JSON: {\"queries\": [\"query1\", \"query2\"]}"
         )
 
-        resp = self.llm.generate_json(
-            prompt,
-            system="You are an expert research analyst designing precise web search strategies."
-        )
-
-        queries = resp.get("queries", [])
+        try:
+            resp = self.llm.generate_json(
+                prompt,
+                system="You are an expert research analyst designing precise web search strategies.",
+                raise_on_error=True
+            )
+            queries = resp.get("queries", [])
+        except Exception as e:
+            state.add_log(f"Warning: Query generation JSON parsing exception ({e}). Using fallback queries.")
+            queries = []
         if not queries or not isinstance(queries, list):
             # Fallback queries
             if state.latest_feedback:
