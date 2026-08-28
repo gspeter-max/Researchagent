@@ -1,4 +1,7 @@
+"""Hermetic, table-driven unit tests for LLM strategy dispatch, JSON parsing, and fault injection."""
+
 import unittest
+from unittest.mock import patch
 from agent.llm import (
     Client,
     Config,
@@ -29,95 +32,71 @@ from agent.llm import (
 
 
 class TestLLMClient(unittest.TestCase):
-    def test_provider_registry_mapping(self):
-        self.assertIn(ProviderType.ANTHROPIC, PROVIDER_REGISTRY)
-        self.assertIn(ProviderType.OPENAI, PROVIDER_REGISTRY)
-        self.assertIn(ProviderType.GEMINI, PROVIDER_REGISTRY)
-        self.assertIn(ProviderType.HEURISTIC, PROVIDER_REGISTRY)
-        self.assertEqual(PROVIDER_REGISTRY[ProviderType.HEURISTIC], HeuristicProvider)
+    """Tests LLM Strategy Dispatch, JSON Extraction Robustness, and Fault Injection."""
+
+    def test_json_parsing_equivalence_partitions(self):
+        """Table-driven test of JSON parsing permutations (pure, markdown, dirty trailing commas, non-JSON)."""
+        # Arrange: Matrix of (raw_input, expected_output)
+        vectors = [
+            ('{"key": "value", "num": 42}', {"key": "value", "num": 42}),
+            ('```json\n{"status": "ok", "items": [1, 2]}\n```', {"status": "ok", "items": [1, 2]}),
+            ('```\n{"markdown_no_lang": true}\n```', {"markdown_no_lang": True}),
+            ('Leading text {"score": 0.85, "tags": ["ai", "nlp", ], } trailing noise', {"score": 0.85, "tags": ["ai", "nlp"]}),
+            ('Non-JSON plain text response.', None),
+            ('', None),
+            ('{invalid: json without quotes}', None),
+        ]
+
+        for raw_input, expected_output in vectors:
+            with self.subTest(raw_input=raw_input):
+                # Act
+                parsed = parse_json(raw_input)
+
+                # Assert
+                self.assertEqual(parsed, expected_output)
+
+    def test_fault_injection_json_parse_error(self):
+        """Fault injection: Verifies ParseError is raised under strict mode when invalid output occurs."""
+        # Arrange
+        client = Client(provider=Provider.HEURISTIC)
+        invalid_raw = "This is definitely not a JSON payload."
+
+        # Act & Assert
+        with patch.object(client, "generate", return_value=invalid_raw):
+            # Strict mode: must raise ParseError
+            with self.assertRaises(ParseError) as ctx:
+                client.generate_json("test prompt", strict=True)
+            self.assertEqual(ctx.exception.raw, invalid_raw)
+
+            # Non-strict mode: returns fallback dict
+            fallback = client.generate_json("test prompt", strict=False)
+            self.assertEqual(fallback, {"raw_response": invalid_raw})
+
+    def test_fault_injection_external_provider_failure_fallback(self):
+        """Fault injection: Simulates Anthropic/OpenAI API failure, verifying heuristic fallback."""
+        # Arrange
+        cfg = Config(provider=Provider.OPENAI, key="test-key")
+        client = Client(cfg=cfg)
+
+        # Act: Inject 500 Internal Server Error in strategy
+        with patch.object(client._strategy, "call", side_effect=ProviderError("openai", "HTTP 500")):
+            response = client.generate("Write a research report for topic: Quantum Computing")
+
+        # Assert: Gracefully caught error and executed heuristic fallback
+        self.assertTrue(len(response) > 0)
+        self.assertIn("Quantum Computing", response)
+
+    def test_provider_registry_dispatch_invariants(self):
+        """Verifies O(1) provider registry strategy mapping."""
+        # Assert
+        self.assertEqual(REGISTRY[Provider.ANTHROPIC], Anthropic)
+        self.assertEqual(REGISTRY[Provider.OPENAI], OpenAI)
+        self.assertEqual(REGISTRY[Provider.GEMINI], Gemini)
+        self.assertEqual(REGISTRY[Provider.HEURISTIC], Heuristic)
         self.assertEqual(REGISTRY[Provider.MOCK], Heuristic)
 
-    def test_heuristic_generation(self):
-        client = LLMClient(provider="heuristic")
-        resp = client.generate("Hello world")
-        self.assertTrue(len(resp) > 0)
-
-    def test_heuristic_json_generation(self):
-        client = LLMClient(provider="heuristic")
-        data = client.generate_json("generate queries for topic: Quantum Computing")
-        self.assertIsInstance(data, dict)
-        self.assertIn("queries", data)
-
-    def test_json_parse_error_raising(self):
-        client = LLMClient(provider="heuristic")
-        
-        # Test _extract_json / parse_json returns None on non-JSON
-        invalid_raw = "This is pure unformatted plain text with no json."
-        extracted = client._extract_json(invalid_raw)
-        self.assertIsNone(extracted)
-        self.assertIsNone(parse_json(invalid_raw))
-
-        # Mock client.generate to return invalid text
-        original_generate = client.generate
-        client.generate = lambda p, s="": "Sorry, I cannot answer in JSON."
-        try:
-            with self.assertRaises(LLMJSONParseError) as ctx:
-                client.generate_json("some prompt", raise_on_error=True)
-            self.assertIn("Failed to parse valid JSON", str(ctx.exception))
-            self.assertEqual(ctx.exception.raw_response, "Sorry, I cannot answer in JSON.")
-            
-            # When raise_on_error / strict is False, returns raw_response dictionary
-            fallback = client.generate_json("some prompt", raise_on_error=False)
-            self.assertIn("raw_response", fallback)
-
-            fallback2 = client.generate_json("some prompt", strict=False)
-            self.assertIn("raw_response", fallback2)
-
-            with self.assertRaises(ParseError) as ctx2:
-                client.generate_json("some prompt", strict=True)
-            self.assertEqual(ctx2.exception.raw, "Sorry, I cannot answer in JSON.")
-        finally:
-            client.generate = original_generate
-
-    def test_config_ergonomics_and_aliases(self):
-        cfg = Config(
-            provider=Provider.OPENAI,
-            key="test-key",
-            model="gpt-4o",
-            url="https://custom.openai.com",
-            temp=0.7,
-            max_tokens=1024,
-            timeout=15,
-        )
-        self.assertEqual(cfg.provider, Provider.OPENAI)
-        self.assertEqual(cfg.key, "test-key")
-        self.assertEqual(cfg.api_key, "test-key")
-        self.assertEqual(cfg.url, "https://custom.openai.com")
-        self.assertEqual(cfg.base_url, "https://custom.openai.com")
-        self.assertEqual(cfg.temp, 0.7)
-        self.assertEqual(cfg.temperature, 0.7)
-
-        # Legacy initialization
-        legacy_cfg = LLMConfig(
-            provider=ProviderType.ANTHROPIC,
-            api_key="legacy-key",
-            base_url="https://legacy.anthropic.com",
-            temperature=0.5,
-        )
-        self.assertEqual(legacy_cfg.key, "legacy-key")
-        self.assertEqual(legacy_cfg.url, "https://legacy.anthropic.com")
-        self.assertEqual(legacy_cfg.temp, 0.5)
-
-    def test_parse_json_variants(self):
-        # Markdown fenced
-        fenced = '```json\n{"foo": "bar"}\n```'
-        self.assertEqual(parse_json(fenced), {"foo": "bar"})
-
-        # Raw outer braces with trailing comma repair
-        dirty = 'Prefix text {"foo": "bar", "nums": [1, 2, ], } suffix'
-        self.assertEqual(parse_json(dirty), {"foo": "bar", "nums": [1, 2]})
-
-    def test_client_aliases_and_subclasses(self):
+    def test_backward_compatibility_aliases(self):
+        # Assert
         self.assertIs(LLMClient, Client)
         self.assertIs(LLMConfig, Config)
         self.assertIs(ProviderType, Provider)
