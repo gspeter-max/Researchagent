@@ -44,32 +44,6 @@ def render_score_bar(score: float, threshold: float = 0.75) -> str:
     return f"{color}[{bar}] {score:.2f} (Threshold: {threshold:.2f}){RESET}"
 
 
-def cli_initial_guidance_callback(topic: str, state: ResearchState) -> Tuple[str, Optional[str]]:
-    print("\n" + "=" * 65)
-    print(f"{BOLD}{CYAN}🎯 RESEARCH QUERY INITIAL ALIGNMENT{RESET}")
-    print("=" * 65)
-    print(f"{BOLD}Topic:{RESET} {topic}")
-    print(f"{CYAN}You can provide initial focus guidance or proceed directly.{RESET}")
-    print("-" * 65)
-    print("  • Press [Enter] to proceed with default search strategy")
-    print("  • Type specific focus / instructions to guide query generation")
-    print("  • Type 'cancel' or 'q' to abort")
-    print("-" * 65)
-
-    try:
-        user_input = input(f"{BOLD}Guidance / Action: {RESET}").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\nExiting.")
-        sys.exit(0)
-
-    if user_input.lower() in ["cancel", "q", "quit", "exit"]:
-        return "CANCEL", None
-    elif user_input:
-        return "PROCEED", user_input
-    else:
-        return "PROCEED", None
-
-
 def cli_verification_feedback_callback(state: ResearchState) -> Tuple[str, Optional[str]]:
     eval_res = state.evaluation
     score = eval_res.score if eval_res else 0.0
@@ -155,7 +129,6 @@ def main():
 
     final_state = workflow.run(
         topic=topic,
-        initial_guidance_callback=cli_initial_guidance_callback,
         verification_feedback_callback=cli_verification_feedback_callback,
         on_step_callback=print_step
     )

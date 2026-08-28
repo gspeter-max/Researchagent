@@ -8,10 +8,7 @@ from agent.nodes.evaluator import EvaluatorNode
 from agent.nodes.synthesizer import SynthesizerNode
 
 
-# Callback signatures for Human-in-the-Loop (HITL)
-# Initial: (topic, state) -> (action: HumanAction | str, guidance_text: Optional[str])
-InitialGuidanceCallback = Callable[[str, ResearchState], Tuple[Union[HumanAction, str], Optional[str]]]
-
+# Callback signature for Human-in-the-Loop (HITL) at verification
 # Verification: (state) -> (action: HumanAction | str, feedback_text: Optional[str])
 VerificationFeedbackCallback = Callable[[ResearchState], Tuple[Union[HumanAction, str], Optional[str]]]
 
@@ -30,7 +27,15 @@ class ResearchReviewWorkflow:
     """
     Loop-Engineered Research & Review Workflow.
     
-    Employs Dictionary-based Action Dispatch to eliminate fragile if/else ladders.
+    Flow:
+    1. Topic Input (Direct Autonomous Launch)
+    2. Query Formulation (topic + state.findings + state.evaluation + state.feedback)
+    3. Web Research & Information Retrieval
+    4. Quality Verification & Scoring (0.0 to 1.0)
+    5. Threshold-Based Routing:
+       - Score >= Threshold -> LLM Synthesizer -> Final Deliverable
+       - Score < Threshold  -> Human-in-the-Loop (Proceed / Cancel / Search More with Feedback)
+                               -> Feedback recorded in state -> Loops back to Step 2
     """
 
     def __init__(
@@ -49,17 +54,7 @@ class ResearchReviewWorkflow:
         self.evaluator_node = EvaluatorNode(self.llm, sufficiency_threshold=self.sufficiency_threshold)
         self.synthesizer_node = SynthesizerNode(self.llm)
 
-        # Action Handler Dispatch Tables
-        self._initial_action_handlers: Dict[
-            HumanAction,
-            Callable[[ResearchState, Optional[str], Callable[[str], None]], WorkflowActionDirective]
-        ] = {
-            HumanAction.CANCEL: self._handle_initial_cancel,
-            HumanAction.PROCEED: self._handle_initial_proceed,
-            HumanAction.PROCEED_OVERRIDE: self._handle_initial_proceed,
-            HumanAction.SEARCH_MORE: self._handle_initial_proceed,
-        }
-
+        # Verification Action Handler Dispatch Table
         self._verification_action_handlers: Dict[
             HumanAction,
             Callable[[ResearchState, Optional[str], EvaluationResult, Callable[[str], None]], WorkflowActionDirective]
@@ -73,30 +68,6 @@ class ResearchReviewWorkflow:
     # -----------------------------------------------------------------------
     # Action Dispatch Handlers
     # -----------------------------------------------------------------------
-
-    def _handle_initial_cancel(
-        self,
-        state: ResearchState,
-        guidance: Optional[str],
-        notify: Callable[[str], None]
-    ) -> WorkflowActionDirective:
-        state.status = AgentStatus.CANCELLED
-        state.add_feedback(HumanAction.CANCEL, "Cancelled by user before research began.")
-        notify("Workflow cancelled by user at initial alignment.")
-        return WorkflowActionDirective(terminate=True)
-
-    def _handle_initial_proceed(
-        self,
-        state: ResearchState,
-        guidance: Optional[str],
-        notify: Callable[[str], None]
-    ) -> WorkflowActionDirective:
-        if guidance:
-            state.add_feedback(HumanAction.PROCEED, guidance)
-            notify(f"Initial guidance applied: '{guidance}'")
-        else:
-            state.add_feedback(HumanAction.PROCEED, None)
-        return WorkflowActionDirective()
 
     def _handle_verification_cancel(
         self,
@@ -156,7 +127,6 @@ class ResearchReviewWorkflow:
     def run(
         self,
         topic: str,
-        initial_guidance_callback: Optional[InitialGuidanceCallback] = None,
         verification_feedback_callback: Optional[VerificationFeedbackCallback] = None,
         on_step_callback: Optional[StepCallback] = None,
     ) -> ResearchState:
@@ -172,28 +142,16 @@ class ResearchReviewWorkflow:
                 on_step_callback(msg, state)
 
         # -------------------------------------------------------------
-        # Step 1: Initial Query & Human Alignment Checkpoint
-        # -------------------------------------------------------------
-        state.status = AgentStatus.AWAITING_INITIAL_GUIDANCE
-        if initial_guidance_callback:
-            raw_action, guidance = initial_guidance_callback(topic, state)
-            action = self._parse_action(raw_action, default=HumanAction.PROCEED)
-            handler = self._initial_action_handlers.get(action, self._handle_initial_proceed)
-            directive = handler(state, guidance, notify)
-            if directive.terminate:
-                return state
-
-        # -------------------------------------------------------------
-        # Step 2: Self-Correcting Research & Verification Loop
+        # Self-Correcting Research & Verification Loop
         # -------------------------------------------------------------
         while state.iteration < state.max_iterations:
             notify(f"=== Research Cycle #{state.iteration + 1} ===")
 
-            # 2a. Query Generation & Search Retrieval
+            # 1. Query Generation & Search Retrieval
             state = self.research_node.run(state)
             notify(f"Research cycle completed. Total unique findings collected: {len(state.findings)}")
 
-            # 2b. Quality Verification
+            # 2. Quality Verification
             state = self.evaluator_node.run(state)
             eval_res = state.evaluation
 
@@ -203,7 +161,7 @@ class ResearchReviewWorkflow:
             )
             notify(f"Critique: {eval_res.critique}")
 
-            # 2c. Threshold Routing
+            # 3. Threshold Routing
             if eval_res.is_sufficient:
                 notify("✓ Quality threshold satisfied! Routing directly to LLM Synthesizer.")
                 break
@@ -213,7 +171,7 @@ class ResearchReviewWorkflow:
                 notify(f"Reached maximum loop iterations ({state.max_iterations}). Routing to synthesis.")
                 break
 
-            # 2d. Human-in-the-Loop Gate for Low Scores
+            # 4. Human-in-the-Loop Gate (EXCLUSIVELY for Low Verification Scores)
             state.status = AgentStatus.AWAITING_VERIFICATION_FEEDBACK
             notify("--- Human-in-the-Loop Review Triggered (Score below threshold) ---")
 
@@ -232,7 +190,7 @@ class ResearchReviewWorkflow:
                 break
 
         # -------------------------------------------------------------
-        # Step 3: LLM Synthesis (Final Answer Generation)
+        # Final Step: LLM Synthesis (Deliverable Generation)
         # -------------------------------------------------------------
         notify("Generating final comprehensive intelligence report...")
         state = self.synthesizer_node.run(state)

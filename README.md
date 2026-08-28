@@ -5,9 +5,9 @@ An autonomous research agent built with **Loop Engineering**, continuous context
 ## Architecture & Loop Engineering Flow
 
 ```
-1. Initial Query & Alignment Checkpoint (Proceed / Cancel / Custom Focus)
+1. Topic Input (Autonomous Launch)
    ↓
-2. Query Formulation (user_query + state.findings + state.evaluation + state.feedback)
+2. Query Formulation (topic + state.findings + state.evaluation + state.feedback)
    ↓
 3. Web Research & Information Retrieval
    ↓
