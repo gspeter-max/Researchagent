@@ -1,10 +1,9 @@
-from typing import Dict, Any, List
 from agent.state import ResearchState, EvaluationResult, AgentStatus
 from agent.llm import LLMClient
 
 
-class EvaluatorNode:
-    """Evaluates the quality, depth, and sufficiency of accumulated research findings."""
+class Evaluator:
+    """Evaluates quality, depth, and sufficiency of research findings."""
 
     def __init__(self, llm: LLMClient, sufficiency_threshold: float = 0.75):
         self.llm = llm
@@ -14,19 +13,17 @@ class EvaluatorNode:
         state.status = AgentStatus.VERIFYING
         state.add_log(f"Verifying research findings (Count: {len(state.findings)})...")
 
-        # Build context of findings
-        findings_summary = "\n".join(
+        summary = "\n".join(
             f"- [{i+1}] Title: {f.title}\n    Snippet: {f.snippet}\n    URL: {f.url}"
             for i, f in enumerate(state.findings[:12])
         )
-
-        feedback_context = state.latest_feedback if state.latest_feedback else "None"
+        fb = state.latest_feedback or "None"
 
         prompt = (
             f"Topic: {state.topic}\n"
             f"Current Iteration: {state.iteration} of {state.max_iterations}\n"
-            f"Human Guidance / Feedback: {feedback_context}\n\n"
-            f"Current Verified Findings:\n{findings_summary}\n\n"
+            f"Human Guidance / Feedback: {fb}\n\n"
+            f"Current Verified Findings:\n{summary}\n\n"
             f"Evaluate whether these findings provide a thorough, accurate, and multi-dimensional answer.\n"
             f"Verification Criteria:\n"
             f"1. Factual depth and technical relevance.\n"
@@ -45,33 +42,35 @@ class EvaluatorNode:
             resp = self.llm.generate_json(
                 prompt,
                 system="You are a rigorous verification reviewer assessing research completeness against quality criteria.",
-                raise_on_error=True
+                raise_on_error=True,
             )
             score = float(resp.get("score", 0.5))
             critique = str(resp.get("critique", "Verification completed."))
-            missing_aspects = resp.get("missing_aspects", [])
-            suggested_queries = resp.get("suggested_queries", [])
+            missing = resp.get("missing_aspects", [])
+            suggested = resp.get("suggested_queries", [])
         except Exception as e:
             state.add_log(f"Warning: Evaluator JSON parsing exception ({e}). Defaulting to partial score.")
             score = 0.5
             critique = "Could not parse structured verification result; triggering re-query loop."
-            missing_aspects = ["Further technical details and real-world evidence"]
-            suggested_queries = []
+            missing = ["Further technical details and real-world evidence"]
+            suggested = []
 
-        is_sufficient = score >= self.sufficiency_threshold
-
-        eval_res = EvaluationResult(
-            is_sufficient=is_sufficient,
+        res = EvaluationResult(
+            is_sufficient=score >= self.sufficiency_threshold,
             score=score,
             critique=critique,
-            missing_aspects=missing_aspects if isinstance(missing_aspects, list) else [],
-            suggested_queries=suggested_queries if isinstance(suggested_queries, list) else []
+            missing_aspects=missing if isinstance(missing, list) else [],
+            suggested_queries=suggested if isinstance(suggested, list) else [],
         )
 
-        state.evaluation = eval_res
-        state.evaluation_history.append(eval_res)
-
+        state.evaluation = res
+        state.evaluation_history.append(res)
         state.add_log(
-            f"Verification Result: Sufficient={eval_res.is_sufficient} (Score: {eval_res.score:.2f} / Threshold: {self.sufficiency_threshold:.2f}) | {eval_res.critique}"
+            f"Verification Result: Sufficient={res.is_sufficient} "
+            f"(Score: {res.score:.2f} / Threshold: {self.sufficiency_threshold:.2f}) | {res.critique}"
         )
         return state
+
+
+# Backward-compatibility alias
+EvaluatorNode = Evaluator

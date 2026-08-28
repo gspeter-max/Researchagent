@@ -1,9 +1,10 @@
+from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
 from enum import Enum
+from typing import Optional
 
 
-class AgentStatus(str, Enum):
+class Status(str, Enum):
     INITIALIZED = "INITIALIZED"
     GENERATING_QUERIES = "GENERATING_QUERIES"
     RESEARCHING = "RESEARCHING"
@@ -14,7 +15,7 @@ class AgentStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
-class HumanAction(str, Enum):
+class Action(str, Enum):
     PROCEED = "PROCEED"
     PROCEED_OVERRIDE = "PROCEED_OVERRIDE"
     SEARCH_MORE = "SEARCH_MORE"
@@ -22,7 +23,7 @@ class HumanAction(str, Enum):
 
 
 @dataclass
-class SearchResult:
+class Result:
     title: str
     snippet: str
     url: str
@@ -30,59 +31,67 @@ class SearchResult:
 
 
 @dataclass
-class EvaluationResult:
+class Score:
     is_sufficient: bool
-    score: float  # 0.0 to 1.0
+    score: float
     critique: str
-    missing_aspects: List[str] = field(default_factory=list)
-    suggested_queries: List[str] = field(default_factory=list)
+    missing_aspects: list[str] = field(default_factory=list)
+    suggested_queries: list[str] = field(default_factory=list)
 
 
 @dataclass
-class HumanFeedback:
+class Feedback:
     iteration: int
-    action: HumanAction
+    action: Action
     feedback_text: Optional[str] = None
     verification_score: Optional[float] = None
 
 
 @dataclass
-class ResearchState:
+class State:
     topic: str
     iteration: int = 0
     max_iterations: int = 3
     sufficiency_threshold: float = 0.75
-    search_queries: List[str] = field(default_factory=list)
-    findings: List[SearchResult] = field(default_factory=list)
-    evaluation: Optional[EvaluationResult] = None
-    evaluation_history: List[EvaluationResult] = field(default_factory=list)
+    search_queries: list[str] = field(default_factory=list)
+    findings: list[Result] = field(default_factory=list)
+    evaluation: Optional[Score] = None
+    evaluation_history: list[Score] = field(default_factory=list)
     draft_report: str = ""
     latest_feedback: Optional[str] = None
-    feedback_history: List[HumanFeedback] = field(default_factory=list)
-    status: AgentStatus = AgentStatus.INITIALIZED
-    logs: List[str] = field(default_factory=list)
+    feedback_history: list[Feedback] = field(default_factory=list)
+    status: Status = Status.INITIALIZED
+    logs: list[str] = field(default_factory=list)
 
-    def add_log(self, message: str) -> None:
-        self.logs.append(message)
+    def log(self, msg: str) -> None:
+        self.logs.append(msg)
+
+    def add_log(self, msg: str) -> None:
+        self.log(msg)
 
     def add_feedback(
         self,
-        action: "HumanAction | str",
+        action: Action | str,
         text: Optional[str] = None,
-        score: Optional[float] = None
+        score: Optional[float] = None,
     ) -> None:
         if text:
             self.latest_feedback = text
-
-        if isinstance(action, str):
-            action_enum = HumanAction(action.upper())
-        else:
-            action_enum = action
-
-        feedback_entry = HumanFeedback(
-            iteration=self.iteration,
-            action=action_enum,
-            feedback_text=text,
-            verification_score=score
+        act = Action(action.upper()) if isinstance(action, str) else action
+        self.feedback_history.append(
+            Feedback(
+                iteration=self.iteration,
+                action=act,
+                feedback_text=text,
+                verification_score=score,
+            )
         )
-        self.feedback_history.append(feedback_entry)
+
+
+# Backward compatibility aliases
+SearchResult = Result
+EvaluationResult = Score
+HumanFeedback = Feedback
+ResearchState = State
+AgentStatus = Status
+HumanAction = Action
